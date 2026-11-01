@@ -258,7 +258,7 @@ static char *execute_tool(const char *name, const char *args_str) {
     	
     	if(!path || !old_str || !new_str){
     		cJSON_Delete(args);
-    		return strdup("error: missing required arguments(file_path, old_str, new_str)")
+    		return strdup("error: missing required arguments(file_path, old_str, new_str)");
     	}
     	
     	char *content = read_file(path, NULL);
