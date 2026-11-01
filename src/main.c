@@ -103,7 +103,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Logs from your program will appear here!\n");
 
     // TODO: Uncomment the line below to pass the first stage
-    // printf("%s", cJSON_GetStringValue(content));
+    printf("%s", cJSON_GetStringValue(content));
 
     cJSON_Delete(json);
     return 0;
