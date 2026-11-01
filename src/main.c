@@ -1,10 +1,9 @@
-
-/* TODO : completed step 6 of build your own claude code Using C on CodeCrafters */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <ctype.h>
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
 
@@ -25,8 +24,6 @@ static size_t curl_write_response(void *contents, size_t size, size_t nmemb, voi
     return total;
 }
 
-// Reads an entire file into a heap buffer. Returns NULL on failure.
-// Caller must free the returned buffer.
 static char *read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -55,8 +52,6 @@ static char *read_file(const char *path, size_t *out_len) {
     return buf;
 }
 
-// Writes content to a file, creating it or overwriting it.
-// Returns 0 on success, -1 on failure.
 static int write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
@@ -69,8 +64,6 @@ static int write_file(const char *path, const char *content) {
     return 0;
 }
 
-// Adds a tool spec with the given name, description and parameters to the tools array.
-// `params` is a list of {name, description} pairs; all parameters are strings and required.
 static void add_tool(cJSON *tools, const char *name, const char *description,
                      const char *params[][2], int param_count) {
     cJSON *tool = cJSON_CreateObject();
@@ -96,7 +89,6 @@ static void add_tool(cJSON *tools, const char *name, const char *description,
     cJSON_AddItemToArray(tools, tool);
 }
 
-// Builds the tools array advertised to the model.
 static cJSON *build_tools(void) {
     cJSON *tools = cJSON_CreateArray();
 
@@ -110,32 +102,24 @@ static cJSON *build_tools(void) {
         {"content", "The content to write to the file"},
     };
     add_tool(tools, "Write", "Write content to a file", write_params, 2);
-    
-    // for step 6
+
     const char *bash_params[][2] = {
-    	{"command", "The command to run"}, };
-    add_tool(tools, "Bash", "Executing a shell command", bash_params, 1);
-    
-    const char *edit_params[][2] = {
-    	{"file_path", "The path of the file to edit"},
-    	{"old_str", "The string to be replaced"},
-    	{"new_str", "The replacement string"}
+        {"command", "The command to run"},
     };
-    add_tool(tools, "Edit", "Replace old_str with new_str in a file", edit_params, 3);
+    add_tool(tools, "Bash", "Execute a shell command", bash_params, 1);
 
     return tools;
 }
 
-static char *run_bash(const char *cmd){
+static char *run_bash(const char *cmd) {
+    char full_cmd[2048];
+    snprintf(full_cmd, sizeof(full_cmd), "%s 2>&1", cmd);
 
-	char full_cmd[2048];
-	snprintf(full_cmd, sizeof(full_cmd), "%s 2>&1", cmd);
-	
-	FILE *fp = popen(full_cmd, "r");
+    FILE *fp = popen(full_cmd, "r");
     if (!fp) {
         return strdup("error: failed to execute command");
     }
-    
+
     size_t cap = 1024;
     size_t len = 0;
     char *output = malloc(cap);
@@ -144,7 +128,7 @@ static char *run_bash(const char *cmd){
         return strdup("error: out of memory");
     }
     output[0] = '\0';
-    
+
     char buffer[256];
     while (fgets(buffer, sizeof(buffer), fp) != NULL) {
         size_t b_len = strlen(buffer);
@@ -164,36 +148,10 @@ static char *run_bash(const char *cmd){
     }
 
     pclose(fp);
-    
-    // If the command returned no text output, return an empty string rather than NULL
     return output;
-    
 }
 
-static char *replace_str(const char *src, const char *old_str, const char *new_str) {
-    const char *pos = strstr(src, old_str);
-    if (!pos) return NULL;
-
-    size_t old_len = strlen(old_str);
-    size_t new_len = strlen(new_str);
-    size_t head_len = (size_t)(pos - src);
-    size_t tail_len = strlen(pos + old_len);
-
-    char *result = malloc(head_len + new_len + tail_len + 1);
-    if (!result) return NULL;
-
-    memcpy(result, src, head_len);
-    memcpy(result + head_len, new_str, new_len);
-    memcpy(result + head_len + new_len, pos + old_len, tail_len);
-    result[head_len + new_len + tail_len] = '\0';
-
-    return result;
-}
-
-// Executes a tool call and returns the result as a heap-allocated string.
-// Caller must free the returned string.
 static char *execute_tool(const char *name, const char *args_str) {
-
     if (!name || !args_str) {
         return strdup("error: invalid tool call");
     }
@@ -236,65 +194,182 @@ static char *execute_tool(const char *name, const char *args_str) {
         cJSON_Delete(args);
         return result;
     }
-    
-    if(strcmp(name, "Bash") == 0){
-    	cJSON *args = cJSON_Parse(args_str);
-    	const char *cmd = cJSON_GetStringValue(cJSON_GetObjectItem(args, "command"));
-    	if(!cmd){
-    		cJSON_Delete(args);
-    		return strdup("error: missing command argument");
-    	}
-    	
-    	char *result = run_bash(cmd);
-    	cJSON_Delete(args);
-    	return result;
-    }
-    
-    if(strcmp(name, "Edit") == 0){
-    	cJSON *args = cJSON_Parse(args_str);
-    	const char *path = cJSON_GetStringValue(cJSON_GetObjectItem(args, "file_path"));
-    	const char *old_str = cJSON_GetStringValue(cJSON_GetObjectItem(args, "old_str"));
-    	const char *new_str = cJSON_GetStringValue(cJSON_GetObjectItem(args, "new_str"));
-    	
-    	if(!path || !old_str || !new_str){
-    		cJSON_Delete(args);
-    		return strdup("error: missing required arguments(file_path, old_str, new_str)");
-    	}
-    	
-    	char *content = read_file(path, NULL);
-    	if(!content){
-    		cJSON_Delete(args);
-    		return strdup("error: could not read file");
-    	}
-    	
-    	char *modified = replace_str(content, old_str, new_str);
-    	free(content);
-    	
-    	if(!modified){
-    		cJSON_Delete(args);
-    		return strdup("error: old_str not found in file");
-    	}
-    	
-    	int write_rc = write_file(path, modified);
-    	free(modified);
-    	cJSON_Delete(args);
-    	
-    	if(write_rc != 0){
-    		return strdup("error: could not write file");
-    	}
-    	
-    	return strdup("SUCCESS: replaced old_str with new_str");
+
+    if (strcmp(name, "Bash") == 0) {
+        cJSON *args = cJSON_Parse(args_str);
+        const char *cmd = cJSON_GetStringValue(cJSON_GetObjectItem(args, "command"));
+        if (!cmd) {
+            cJSON_Delete(args);
+            return strdup("error: missing command argument");
+        }
+
+        char *result = run_bash(cmd);
+        cJSON_Delete(args);
+        return result;
     }
 
     return strdup("error: unknown tool");
 }
 
-// Sends the conversation to the model and returns the parsed JSON response.
-// Returns NULL on failure. Caller must cJSON_Delete the result.
+/* ================= Step 7 & 8: Skills & Frontmatter ================= */
+
+static char *trim_whitespace(char *str) {
+    if (!str) return NULL;
+    while (isspace((unsigned char)*str)) str++;
+    if (*str == '\0') return str;
+
+    char *end = str + strlen(str) - 1;
+    while (end > str && isspace((unsigned char)*end)) end--;
+    end[1] = '\0';
+    return str;
+}
+
+static void parse_frontmatter(const char *frontmatter, char **out_name, char **out_desc) {
+    *out_name = NULL;
+    *out_desc = NULL;
+
+    char *copy = strdup(frontmatter);
+    if (!copy) return;
+
+    char *line = strtok(copy, "\r\n");
+    while (line) {
+        char *colon = strchr(line, ':');
+        if (colon) {
+            *colon = '\0';
+            char *key = trim_whitespace(line);
+            char *val = trim_whitespace(colon + 1);
+
+            if (strcmp(key, "name") == 0 && !*out_name) {
+                *out_name = strdup(val);
+            } else if (strcmp(key, "description") == 0 && !*out_desc) {
+                *out_desc = strdup(val);
+            }
+        }
+        line = strtok(NULL, "\r\n");
+    }
+    free(copy);
+}
+
+// Step 7: Discovers skills and formats the system message
+static char *build_skills_system_prompt(void) {
+    DIR *dir = opendir(".claude/skills");
+    if (!dir) return NULL;
+
+    size_t cap = 1024;
+    char *prompt = malloc(cap);
+    if (!prompt) {
+        closedir(dir);
+        return NULL;
+    }
+    strcpy(prompt, "You have access to the following skills:\n");
+
+    int count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        char file_path[512];
+        snprintf(file_path, sizeof(file_path), ".claude/skills/%s/SKILL.md", entry->d_name);
+
+        size_t file_len = 0;
+        char *content = read_file(file_path, &file_len);
+        if (!content) continue;
+
+        char *first_dash = strstr(content, "---");
+        if (first_dash) {
+            char *second_dash = strstr(first_dash + 3, "---");
+            if (second_dash) {
+                size_t fm_len = (size_t)(second_dash - (first_dash + 3));
+                char *fm = malloc(fm_len + 1);
+                if (fm) {
+                    memcpy(fm, first_dash + 3, fm_len);
+                    fm[fm_len] = '\0';
+
+                    char *name = NULL;
+                    char *desc = NULL;
+                    parse_frontmatter(fm, &name, &desc);
+
+                    const char *skill_name = name ? name : entry->d_name;
+                    const char *skill_desc = desc ? desc : "";
+
+                    char line[512];
+                    snprintf(line, sizeof(line), "\n- %s: %s", skill_name, skill_desc);
+
+                    size_t needed = strlen(prompt) + strlen(line) + 1;
+                    if (needed > cap) {
+                        cap = (cap + needed) * 2;
+                        char *tmp = realloc(prompt, cap);
+                        if (tmp) prompt = tmp;
+                    }
+                    strcat(prompt, line);
+                    count++;
+
+                    free(name);
+                    free(desc);
+                    free(fm);
+                }
+            }
+        }
+        free(content);
+    }
+    closedir(dir);
+
+    if (count == 0) {
+        free(prompt);
+        return NULL;
+    }
+
+    return prompt;
+}
+
+// Step 8: Loads the skill body (content after closing ---)
+static char *load_skill_body(const char *skill_name) {
+    char path[512];
+    snprintf(path, sizeof(path), ".claude/skills/%s/SKILL.md", skill_name);
+
+    size_t file_len = 0;
+    char *content = read_file(path, &file_len);
+    if (!content) return NULL;
+
+    char *first_dash = strstr(content, "---");
+    if (!first_dash) {
+        free(content);
+        return NULL;
+    }
+
+    char *second_dash = strstr(first_dash + 3, "---");
+    if (!second_dash) {
+        free(content);
+        return NULL;
+    }
+
+    char *body = second_dash + 3;
+    while (*body == '\r' || *body == '\n' || *body == ' ' || *body == '\t') {
+        body++;
+    }
+
+    size_t len = strlen(body);
+    while (len > 0 && isspace((unsigned char)body[len - 1])) {
+        len--;
+    }
+
+    char *result = malloc(len + 1);
+    if (result) {
+        memcpy(result, body, len);
+        result[len] = '\0';
+    }
+
+    free(content);
+    return result;
+}
+
+/* ==================================================================== */
+
 static cJSON *call_api(const char *base_url, const char *api_key, cJSON *messages, cJSON *tools) {
     cJSON *req = cJSON_CreateObject();
     cJSON_AddStringToObject(req, "model", "anthropic/claude-haiku-4.5");
-    // References, so deleting `req` doesn't free the shared arrays.
     cJSON_AddItemReferenceToObject(req, "messages", messages);
     cJSON_AddItemReferenceToObject(req, "tools", tools);
 
@@ -340,7 +415,6 @@ static cJSON *call_api(const char *base_url, const char *api_key, cJSON *message
 }
 
 int main(int argc, char *argv[]) {
-
     const char *prompt = NULL;
     if (getopt(argc, argv, "p:") == 'p') prompt = optarg;
     if (!prompt) {
@@ -358,15 +432,49 @@ int main(int argc, char *argv[]) {
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
-    // Conversation history that persists across loop iterations.
     cJSON *messages = cJSON_CreateArray();
+
+    // Step 7: Inject system message if skills exist
+    char *system_prompt = build_skills_system_prompt();
+    if (system_prompt) {
+        cJSON *sys_msg = cJSON_CreateObject();
+        cJSON_AddStringToObject(sys_msg, "role", "system");
+        cJSON_AddStringToObject(sys_msg, "content", system_prompt);
+        cJSON_AddItemToArray(messages, sys_msg);
+        free(system_prompt);
+    }
+
+    // Step 8: Resolve slash command
+    const char *final_user_prompt = prompt;
+    char *skill_body = NULL;
+
+    if (prompt[0] == '/') {
+        const char *start = prompt + 1;
+        while (*start == ' ') start++;
+
+        const char *end = start;
+        while (*end && !isspace((unsigned char)*end)) end++;
+
+        size_t name_len = (size_t)(end - start);
+        if (name_len > 0) {
+            char skill_name[256];
+            if (name_len >= sizeof(skill_name)) name_len = sizeof(skill_name) - 1;
+            strncpy(skill_name, start, name_len);
+            skill_name[name_len] = '\0';
+
+            skill_body = load_skill_body(skill_name);
+            if (skill_body) {
+                final_user_prompt = skill_body;
+            }
+        }
+    }
+
     cJSON *user_msg = cJSON_CreateObject();
     cJSON_AddStringToObject(user_msg, "role", "user");
-    cJSON_AddStringToObject(user_msg, "content", prompt);
+    cJSON_AddStringToObject(user_msg, "content", final_user_prompt);
     cJSON_AddItemToArray(messages, user_msg);
 
     cJSON *tools = build_tools();
-
     int exit_code = 0;
 
     while (1) {
@@ -393,12 +501,10 @@ int main(int argc, char *argv[]) {
             break;
         }
 
-        // Record the assistant's message (copy it, since `json` is freed below).
         cJSON_AddItemToArray(messages, cJSON_Duplicate(message, 1));
 
         cJSON *tool_calls = cJSON_GetObjectItem(message, "tool_calls");
         if (!cJSON_IsArray(tool_calls) || cJSON_GetArraySize(tool_calls) == 0) {
-            // No tool calls: this is the final answer.
             const char *text = cJSON_GetStringValue(cJSON_GetObjectItem(message, "content"));
             if (text) {
                 printf("%s", text);
@@ -407,7 +513,6 @@ int main(int argc, char *argv[]) {
             break;
         }
 
-        // Execute every requested tool call and append the results.
         cJSON *call = NULL;
         cJSON_ArrayForEach(call, tool_calls) {
             const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(call, "id"));
@@ -431,10 +536,10 @@ int main(int argc, char *argv[]) {
         cJSON_Delete(json);
     }
 
+    if (skill_body) free(skill_body);
     cJSON_Delete(messages);
     cJSON_Delete(tools);
     curl_global_cleanup();
-    
+
     return exit_code;
-    
 }
