@@ -275,7 +275,7 @@ static char *execute_tool(const char *name, const char *args_str) {
     		return strdup("error: old_str not found in file");
     	}
     	
-    	int wwrite_rc = write_file(path, modified);
+    	int write_rc = write_file(path, modified);
     	free(modified);
     	cJSON_Delete(args);
     	
