@@ -251,7 +251,7 @@ static char *execute_tool(const char *name, const char *args_str) {
     }
     
     if(strcmp(name, "Edit") == 0){
-    	cJSON *args = cJSON_Parse(arg_str);
+    	cJSON *args = cJSON_Parse(args_str);
     	const char *path = cJSON_GetStringValue(cJSON_GetObjectItem(args, "file_path"));
     	const char *old_str = cJSON_GetStringValue(cJSON_GetObjectItem(args, "old_str"));
     	const char *new_str = cJSON_GetStringValue(cJSON_GetObjectItem(args, "new_str"));
