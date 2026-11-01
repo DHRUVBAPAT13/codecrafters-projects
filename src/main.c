@@ -41,10 +41,35 @@ int main(int argc, char *argv[]) {
     cJSON *req = cJSON_CreateObject();
     cJSON_AddStringToObject(req, "model", "anthropic/claude-haiku-4.5");
     cJSON *messages = cJSON_AddArrayToObject(req, "messages");
+    
+    cJSON *tools = cJSON_AddArrayToObject(req, "tools");
+	cJSON *tool = cJSON_CreateObject();
+  	cJSON_AddStringToObject(tool, "type", "function");
+  	cJSON *function = cJSON_CreateObject();
+  	cJSON_AddItemToObject(tool, "function", function);
+  	cJSON_AddStringToObject(function, "name", "Read");
+  	cJSON_AddStringToObject(function, "description",
+                          "Read and return the contents of a file");
+  	cJSON *parameters = cJSON_CreateObject();
+  	cJSON_AddItemToObject(function, "parameters", parameters);
+  	cJSON_AddStringToObject(parameters, "type", "object");
+  	cJSON *properties = cJSON_CreateObject();
+  	cJSON_AddItemToObject(parameters, "properties", properties);
+  	cJSON *file_path = cJSON_CreateObject();
+  	cJSON_AddItemToObject(properties, "file_path", file_path);
+  	cJSON_AddStringToObject(file_path, "type", "string");
+  	cJSON_AddStringToObject(file_path, "description",
+                          "The path to the file to read");
+  	cJSON *required = cJSON_CreateArray();
+  	cJSON_AddItemToArray(required, cJSON_CreateString("file_path"));
+  	cJSON_AddItemToObject(parameters, "required", required);
+  	  
     cJSON *msg = cJSON_CreateObject();
     cJSON_AddStringToObject(msg, "role", "user");
     cJSON_AddStringToObject(msg, "content", prompt);
+    
     cJSON_AddItemToArray(messages, msg);
+    cJSON_AddItemToArray(tools, tool);
 
     char *body = cJSON_PrintUnformatted(req);
     cJSON_Delete(req);
