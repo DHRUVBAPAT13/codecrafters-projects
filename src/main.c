@@ -1,3 +1,7 @@
+
+/* 	TODO : completed step 5 of build your own claude code Using C on CodeCrafters 
+	now code for step 6 is also added in here*/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,8 +111,57 @@ static cJSON *build_tools(void) {
         {"content", "The content to write to the file"},
     };
     add_tool(tools, "Write", "Write content to a file", write_params, 2);
+    
+    // for step 6
+    const char *bash_params[][2] = {
+    	{"command", "The command to run"}, };
+    add_tool(tools, "Bash", "Executing a shell command", bash_params, 1);
 
     return tools;
+}
+
+static char *run_bash(const char *cmd){
+
+	char full_cmd[2048];
+	snprintf(full_cmd, sizeof(full_cmd), "%s 2>&1", cmd);
+	
+	FILE *fp = popen(full_cmd, "r");
+    if (!fp) {
+        return strdup("error: failed to execute command");
+    }
+    
+    size_t cap = 1024;
+    size_t len = 0;
+    char *output = malloc(cap);
+    if (!output) {
+        pclose(fp);
+        return strdup("error: out of memory");
+    }
+    output[0] = '\0';
+    
+    char buffer[256];
+    while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        size_t b_len = strlen(buffer);
+        if (len + b_len + 1 > cap) {
+            cap = (cap + b_len) * 2;
+            char *tmp = realloc(output, cap);
+            if (!tmp) {
+                free(output);
+                pclose(fp);
+                return strdup("error: out of memory");
+            }
+            output = tmp;
+        }
+        memcpy(output + len, buffer, b_len);
+        len += b_len;
+        output[len] = '\0';
+    }
+
+    pclose(fp);
+    
+    // If the command returned no text output, return an empty string rather than NULL
+    return output;
+    
 }
 
 // Executes a tool call and returns the result as a heap-allocated string.
@@ -155,6 +208,19 @@ static char *execute_tool(const char *name, const char *args_str) {
         }
         cJSON_Delete(args);
         return result;
+    }
+    
+    if(strcmp(name, "Bash") == 0){
+    	cJSON *args = cJSON_Parse(args_str);
+    	const char *cmd = cJSON_GetStringValue(cJSONGetObjectItem(args, "command"));
+    	if(!cmd){
+    		cJSON_Delete(args);
+    		return strdup("error : missing command argument");
+    	}
+    	
+    	char *result = run_bash(cmd);
+    	cJSON_Delete(args);
+    	return result;
     }
 
     return strdup("error: unknown tool");
@@ -211,6 +277,7 @@ static cJSON *call_api(const char *base_url, const char *api_key, cJSON *message
 }
 
 int main(int argc, char *argv[]) {
+
     const char *prompt = NULL;
     if (getopt(argc, argv, "p:") == 'p') prompt = optarg;
     if (!prompt) {
@@ -304,5 +371,7 @@ int main(int argc, char *argv[]) {
     cJSON_Delete(messages);
     cJSON_Delete(tools);
     curl_global_cleanup();
+    
     return exit_code;
+    
 }
