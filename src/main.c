@@ -115,6 +115,13 @@ static cJSON *build_tools(void) {
     const char *bash_params[][2] = {
     	{"command", "The command to run"}, };
     add_tool(tools, "Bash", "Executing a shell command", bash_params, 1);
+    
+    const char *edit_params[][2] = {
+    	{"file_path", "The path of the file to edit"},
+    	{"old_str", "The string to be replaced"},
+    	{"new_str", "The replacement string"}
+    };
+    add_tool(tools, "Edit", "Replace old_str with new_str in a file", edit_params, 3);
 
     return tools;
 }
@@ -163,9 +170,30 @@ static char *run_bash(const char *cmd){
     
 }
 
+static char *replace_str(const char *src, const char *old_str, const char *new_str) {
+    const char *pos = strstr(src, old_str);
+    if (!pos) return NULL;
+
+    size_t old_len = strlen(old_str);
+    size_t new_len = strlen(new_str);
+    size_t head_len = (size_t)(pos - src);
+    size_t tail_len = strlen(pos + old_len);
+
+    char *result = malloc(head_len + new_len + tail_len + 1);
+    if (!result) return NULL;
+
+    memcpy(result, src, head_len);
+    memcpy(result + head_len, new_str, new_len);
+    memcpy(result + head_len + new_len, pos + old_len, tail_len);
+    result[head_len + new_len + tail_len] = '\0';
+
+    return result;
+}
+
 // Executes a tool call and returns the result as a heap-allocated string.
 // Caller must free the returned string.
 static char *execute_tool(const char *name, const char *args_str) {
+
     if (!name || !args_str) {
         return strdup("error: invalid tool call");
     }
@@ -214,12 +242,48 @@ static char *execute_tool(const char *name, const char *args_str) {
     	const char *cmd = cJSON_GetStringValue(cJSON_GetObjectItem(args, "command"));
     	if(!cmd){
     		cJSON_Delete(args);
-    		return strdup("error : missing command argument");
+    		return strdup("error: missing command argument");
     	}
     	
     	char *result = run_bash(cmd);
     	cJSON_Delete(args);
     	return result;
+    }
+    
+    if(strcmp(name, "Edit") == 0){
+    	cJSON *args = cJSON_Parse(arg_str);
+    	const char *path = cJSON_GetStringValue(cJSON_GetObjectItem(args, "file_path"));
+    	const char *old_str = cJSON_GetStringValue(cJSON_GetObjectItem(args, "old_str"));
+    	const char *new_str = cJSON_GetStringValue(cJSON_GetObjectItem(args, "new_str"));
+    	
+    	if(!path || !old_str || !new_str){
+    		cJSON_Delete(args);
+    		return strdup("error: missing required arguments(file_path, old_str, new_str)")
+    	}
+    	
+    	char *content = read_file(path, NULL);
+    	if(!content){
+    		cJSON_Delete(args);
+    		return strdup("error: could not read file");
+    	}
+    	
+    	char *modified = replace_str(content, old_str, new_str);
+    	free(content);
+    	
+    	if(!modified){
+    		cJSON_Delete(args);
+    		return strdup("error: old_str not found in file");
+    	}
+    	
+    	int wwrite_rc = write_file(path, modified);
+    	free(modified);
+    	cJSON_Delete(args);
+    	
+    	if(write_rc != 0){
+    		return strdup("error: could not write file");
+    	}
+    	
+    	return strdup("SUCCESS: replaced old_str with new_str");
     }
 
     return strdup("error: unknown tool");
