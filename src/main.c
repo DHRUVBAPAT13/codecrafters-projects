@@ -24,7 +24,7 @@ void execute_read(const char *file_path){
 	char *content = malloc(file_size + 1);
 	
 	if(!content){
-		frpintf(stderr, "failed to allocate memory for file content\n");
+		fprintf(stderr, "failed to allocate memory for file content\n");
 		fclose(fd);
 		return;
 	}
