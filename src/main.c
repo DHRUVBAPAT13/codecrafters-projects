@@ -10,6 +10,32 @@ struct response_buf {
     size_t size;
 };
 
+void execute_read(const char *file_path){
+	
+	FILE *fd = fopen(file_path, "r");
+	if(!fd){
+		fprintf(stderr, "falied to open file : %s\n", file_path);
+		return;
+	}
+	
+	fseek(fd, 0, SEEK_END);
+	long file_size = ftell(fd);
+	fseek(fd, 0, SEEK_SET);
+	char *content = malloc(file_size + 1);
+	
+	if(!content){
+		frpintf(stderr, "failed to allocate memory for file content\n");
+		fclose(fd);
+		return;
+	}
+	
+	fread(content, 1, file_size, fd);
+	content[file_size] = '\0';
+	printf("%s", content);
+	fclose(fd);
+	free(content);
+}
+
 static size_t curl_write_response(void *contents, size_t size, size_t nmemb, void *userp) {
     size_t total = size * nmemb;
     struct response_buf *buf = (struct response_buf *)userp;
@@ -123,12 +149,27 @@ int main(int argc, char *argv[]) {
     cJSON *first = cJSON_GetArrayItem(choices, 0);
     cJSON *message = cJSON_GetObjectItem(first, "message");
     cJSON *content = cJSON_GetObjectItem(message, "content");
-
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    fprintf(stderr, "Logs from your program will appear here!\n");
-
-    // TODO: Uncomment the line below to pass the first stage
-    printf("%s", cJSON_GetStringValue(content));
+    
+    cJSON *tool_calls = cJSON_GetObjectItem(message, "tool_calls");
+    
+    if(tool_calls && cJSON_IsArray(tool_calls) && cJSON_GetArraySize(tool_calls) > 0){
+    
+    	cJSON *first_tool = cJSON_GetArrayItem(tool_calls, 0);
+    	cJSON *func = cJSON_GetObjectItem(first_tool, "function");
+        cJSON *function_name = cJSON_GetObjectItem(func, "name");
+        cJSON *arguments = cJSON_GetObjectItem(func, "arguments");
+        cJSON *args_json = cJSON_Parse(cJSON_GetStringValue(arguments));
+        
+        const char *file_path = 
+        	cJSON_GetStringValue(cJSON_GetObjectItem(args_json, "file_path"));
+        	
+        execute_read(file_path);
+        
+        cJSON_Delete(args_json);
+    }
+    else{
+    	printf("%s", cJSON_GetStringValue(content));
+    }
 
     cJSON_Delete(json);
     return 0;
