@@ -212,7 +212,7 @@ static char *execute_tool(const char *name, const char *args_str) {
     
     if(strcmp(name, "Bash") == 0){
     	cJSON *args = cJSON_Parse(args_str);
-    	const char *cmd = cJSON_GetStringValue(cJSONGetObjectItem(args, "command"));
+    	const char *cmd = cJSON_GetStringValue(cJSON_GetObjectItem(args, "command"));
     	if(!cmd){
     		cJSON_Delete(args);
     		return strdup("error : missing command argument");
