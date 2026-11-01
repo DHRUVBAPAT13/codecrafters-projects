@@ -1,6 +1,5 @@
 
-/* 	TODO : completed step 5 of build your own claude code Using C on CodeCrafters 
-	now code for step 6 is also added in here*/
+/* TODO : completed step 6 of build your own claude code Using C on CodeCrafters */
 
 #include <stdio.h>
 #include <stdlib.h>
