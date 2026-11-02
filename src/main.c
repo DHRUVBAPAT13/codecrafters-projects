@@ -560,6 +560,39 @@ int main(int argc, char *argv[]) {
         cJSON_AddItemToArray(messages, sys_msg);
         free(system_prompt);
     }
+    
+    // Step 8 & 9: Resolve slash commands and placeholder arguments
+    const char *final_user_prompt = prompt;
+    char *skill_body = NULL;
+    char *substituted_body = NULL;
+
+    if (prompt[0] == '/') {
+        const char *start = prompt + 1;
+        while (*start == ' ') start++;
+
+        const char *end = start;
+        while (*end && !isspace((unsigned char)*end)) end++;
+
+        size_t name_len = (size_t)(end - start);
+        if (name_len > 0) {
+            char skill_name[256];
+            if (name_len >= sizeof(skill_name)) name_len = sizeof(skill_name) - 1;
+            strncpy(skill_name, start, name_len);
+            skill_name[name_len] = '\0';
+
+            // Everything after the skill name represents the arguments
+            const char *raw_args = end;
+            while (*raw_args == ' ') raw_args++;
+
+            skill_body = load_skill_body(skill_name);
+            if (skill_body) {
+                // Step 9: Substitute $ARGUMENTS, $ARGUMENTS[i], and $i
+                substituted_body = substitute_placeholders(skill_body, raw_args);
+                final_user_prompt = substituted_body ? substituted_body : skill_body;
+            }
+        }
+    }
+
 
     // Step 10: Stacked skill expansion
     char *expanded_skills[32];
