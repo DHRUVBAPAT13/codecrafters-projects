@@ -475,6 +475,12 @@ static char *load_skill_body(const char *skill_name) {
     return result;
 }
 
+static int skill_exists(const char *name) {
+	char path[512];
+	snprintf(path, sizeof(path), ".claude/skills/%s/SKILL.md", name);
+	return access(path, F_OK) == 0;
+}
+
 /* ==================================================================== */
 
 static cJSON *call_api(const char *base_url, const char *api_key, cJSON *messages, cJSON *tools) {
@@ -555,42 +561,70 @@ int main(int argc, char *argv[]) {
         free(system_prompt);
     }
 
-    // Step 8: Resolve slash command
-    const char *final_user_prompt = prompt;
-    char *skill_body = NULL;
-    char *substituted_body = NULL;
+    // Step 10: Stacked skill expansion
+    char *expanded_skills[32];
+    int expanded_count = 0;
+    const char *curr = prompt;
 
-    if (prompt[0] == '/') {
-        const char *start = prompt + 1;
-        while (*start == ' ') start++;
+    while (*curr) {
+        // Skip leading whitespace
+        while (*curr && isspace((unsigned char)*curr)) curr++;
+        if (*curr != '/') break;
 
-        const char *end = start;
-        while (*end && !isspace((unsigned char)*end)) end++;
-
-        size_t name_len = (size_t)(end - start);
-        if (name_len > 0) {
-            char skill_name[256];
-            if (name_len >= sizeof(skill_name)) name_len = sizeof(skill_name) - 1;
-            strncpy(skill_name, start, name_len);
-            skill_name[name_len] = '\0';
-            
-            // everything after skill name represents the arguments
-            const char *raw_args = end;
-            while(*raw_args == ' ') raw_args++;
-
-            skill_body = load_skill_body(skill_name);
-            if (skill_body) {
-            	// step 9: substitute $ARGUMENTS, $ARGUMENTS[i], and $i
-            	substituted_body = substitute_placeholders(skill_body, raw_args);
-                final_user_prompt = substituted_body ? substituted_body : skill_body;
-            }
+        // Extract token after '/'
+        const char *token_start = curr + 1;
+        const char *token_end = token_start;
+        while (*token_end && !isspace((unsigned char)*token_end)) {
+            token_end++;
         }
+
+        size_t name_len = (size_t)(token_end - token_start);
+        if (name_len == 0 || name_len >= 256) break;
+
+        char candidate[256];
+        memcpy(candidate, token_start, name_len);
+        candidate[name_len] = '\0';
+
+        if (!skill_exists(candidate)) {
+            // Not a valid skill -> stops expansion run
+            break;
+        }
+
+        expanded_skills[expanded_count++] = strdup(candidate);
+        curr = token_end;
+
+        if (expanded_count >= 32) break;
     }
 
-    cJSON *user_msg = cJSON_CreateObject();
-    cJSON_AddStringToObject(user_msg, "role", "user");
-    cJSON_AddStringToObject(user_msg, "content", final_user_prompt);
-    cJSON_AddItemToArray(messages, user_msg);
+    // Remaining string after the last valid skill token represents raw_args
+    while (*curr && isspace((unsigned char)*curr)) curr++;
+    const char *raw_args = curr;
+
+    if (expanded_count == 0) {
+        // Normal non-skill prompt
+        cJSON *user_msg = cJSON_CreateObject();
+        cJSON_AddStringToObject(user_msg, "role", "user");
+        cJSON_AddStringToObject(user_msg, "content", prompt);
+        cJSON_AddItemToArray(messages, user_msg);
+    } else {
+        // Append a separate user message for each expanded skill
+        for (int i = 0; i < expanded_count; i++) {
+            char *body = load_skill_body(expanded_skills[i]);
+            if (body) {
+                char *substituted = substitute_placeholders(body, raw_args);
+                const char *msg_text = substituted ? substituted : body;
+
+                cJSON *user_msg = cJSON_CreateObject();
+                cJSON_AddStringToObject(user_msg, "role", "user");
+                cJSON_AddStringToObject(user_msg, "content", msg_text);
+                cJSON_AddItemToArray(messages, user_msg);
+
+                if (substituted) free(substituted);
+                free(body);
+            }
+            free(expanded_skills[i]);
+        }
+    }
 
     cJSON *tools = build_tools();
     int exit_code = 0;
