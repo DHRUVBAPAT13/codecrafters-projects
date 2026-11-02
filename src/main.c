@@ -111,6 +111,116 @@ static cJSON *build_tools(void) {
     return tools;
 }
 
+// Substitutes $ARGUMENTS, $ARGUMENTS[i], and $i placeholders in template.
+// Caller must free the returned string.
+static char *substitute_placeholders(const char *template, const char *raw_args) {
+    if (!template) return NULL;
+
+    // 1. Trim raw arguments string ($ARGUMENTS)
+    char full_args[1024] = "";
+    if (raw_args) {
+        while (isspace((unsigned char)*raw_args)) raw_args++;
+        strncpy(full_args, raw_args, sizeof(full_args) - 1);
+        full_args[sizeof(full_args) - 1] = '\0';
+        // Trim trailing space
+        size_t fa_len = strlen(full_args);
+        while (fa_len > 0 && isspace((unsigned char)full_args[fa_len - 1])) {
+            full_args[--fa_len] = '\0';
+        }
+    }
+
+    // 2. Tokenize positional arguments ($0, $1, ...)
+    char *args_tokens[64];
+    int arg_count = 0;
+    char args_copy[1024];
+    strncpy(args_copy, full_args, sizeof(args_copy) - 1);
+    args_copy[sizeof(args_copy) - 1] = '\0';
+
+    char *token = strtok(args_copy, " \t\r\n");
+    while (token && arg_count < 64) {
+        args_tokens[arg_count++] = token;
+        token = strtok(NULL, " \t\r\n");
+    }
+
+    // 3. Scan and build the substituted string buffer
+    size_t cap = strlen(template) + strlen(full_args) * 2 + 512;
+    char *out = malloc(cap);
+    if (!out) return NULL;
+    size_t out_len = 0;
+
+    const char *p = template;
+    while (*p) {
+        if (*p == '$') {
+            // Check for $ARGUMENTS[...] or $ARGUMENTS
+            if (strncmp(p, "$ARGUMENTS", 10) == 0) {
+                if (p[10] == '[') {
+                    // $ARGUMENTS[index]
+                    char *end_bracket = strchr(p + 11, ']');
+                    if (end_bracket) {
+                        int idx = atoi(p + 11);
+                        const char *rep = (idx >= 0 && idx < arg_count) ? args_tokens[idx] : "";
+                        size_t rep_len = strlen(rep);
+
+                        while (out_len + rep_len + 1 > cap) {
+                            cap *= 2;
+                            char *tmp = realloc(out, cap);
+                            if (!tmp) { free(out); return NULL; }
+                            out = tmp;
+                        }
+                        memcpy(out + out_len, rep, rep_len);
+                        out_len += rep_len;
+                        p = end_bracket + 1;
+                        continue;
+                    }
+                } else {
+                    // Plain $ARGUMENTS
+                    size_t rep_len = strlen(full_args);
+                    while (out_len + rep_len + 1 > cap) {
+                        cap *= 2;
+                        char *tmp = realloc(out, cap);
+                        if (!tmp) { free(out); return NULL; }
+                        out = tmp;
+                    }
+                    memcpy(out + out_len, full_args, rep_len);
+                    out_len += rep_len;
+                    p += 10;
+                    continue;
+                }
+            }
+            // Check for $0, $1, $2, ...
+            else if (isdigit((unsigned char)*(p + 1))) {
+                char *end_digit = NULL;
+                long idx = strtol(p + 1, &end_digit, 10);
+                const char *rep = (idx >= 0 && idx < arg_count) ? args_tokens[idx] : "";
+                size_t rep_len = strlen(rep);
+
+                while (out_len + rep_len + 1 > cap) {
+                    cap *= 2;
+                    char *tmp = realloc(out, cap);
+                    if (!tmp) { free(out); return NULL; }
+                    out = tmp;
+                }
+                memcpy(out + out_len, rep, rep_len);
+                out_len += rep_len;
+                p = end_digit;
+                continue;
+            }
+        }
+
+        // Regular character copy
+        if (out_len + 2 > cap) {
+            cap *= 2;
+            char *tmp = realloc(out, cap);
+            if (!tmp) { free(out); return NULL; }
+            out = tmp;
+        }
+        out[out_len++] = *p++;
+    }
+
+    out[out_len] = '\0';
+    return out;
+}
+
 static char *run_bash(const char *cmd) {
     char full_cmd[2048];
     snprintf(full_cmd, sizeof(full_cmd), "%s 2>&1", cmd);
@@ -415,6 +525,7 @@ static cJSON *call_api(const char *base_url, const char *api_key, cJSON *message
 }
 
 int main(int argc, char *argv[]) {
+
     const char *prompt = NULL;
     if (getopt(argc, argv, "p:") == 'p') prompt = optarg;
     if (!prompt) {
@@ -447,6 +558,7 @@ int main(int argc, char *argv[]) {
     // Step 8: Resolve slash command
     const char *final_user_prompt = prompt;
     char *skill_body = NULL;
+    char *substituted_body = NULL;
 
     if (prompt[0] == '/') {
         const char *start = prompt + 1;
@@ -461,9 +573,15 @@ int main(int argc, char *argv[]) {
             if (name_len >= sizeof(skill_name)) name_len = sizeof(skill_name) - 1;
             strncpy(skill_name, start, name_len);
             skill_name[name_len] = '\0';
+            
+            // everything after skill name represents the arguments
+            const char *raw_args = end;
+            while(*raw_args == ' ') raw_args++;
 
             skill_body = load_skill_body(skill_name);
             if (skill_body) {
+            	// step 9: substitute $ARGUMENTS, $ARGUMENTS[i], and $i
+            	substituted_body = sustitute_placeholder(skill_body, raw_args);
                 final_user_prompt = skill_body;
             }
         }
@@ -536,10 +654,13 @@ int main(int argc, char *argv[]) {
         cJSON_Delete(json);
     }
 
+	if(substituted_body) free(substituted_body);
     if (skill_body) free(skill_body);
+    
     cJSON_Delete(messages);
     cJSON_Delete(tools);
     curl_global_cleanup();
 
     return exit_code;
+    
 }
