@@ -348,7 +348,7 @@ static void parse_frontmatter(const char* frontmatter, char** out_name, char** o
             else if (out_desc && strcmp(key, "description") == 0 && !*out_desc) {
                 *out_desc = strdup(val);
             }
-            else if(sout_context && trcmp(key, "context") == 0 && !*out_context){
+            else if(out_context && strcmp(key, "context") == 0 && !*out_context){
             	*out_context = strdup(val);
             }
         }
