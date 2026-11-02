@@ -581,7 +581,7 @@ int main(int argc, char *argv[]) {
             skill_body = load_skill_body(skill_name);
             if (skill_body) {
             	// step 9: substitute $ARGUMENTS, $ARGUMENTS[i], and $i
-            	substituted_body = susbtitute_placeholder(skill_body, raw_args);
+            	substituted_body = substitute_placeholder(skill_body, raw_args);
                 final_user_prompt = skill_body;
             }
         }
