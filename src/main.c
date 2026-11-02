@@ -12,6 +12,14 @@ struct response_buf {
     size_t size;
 };
 
+// Forward declarations to avoid implicit declaration errors
+static cJSON* call_api(const char* base_url, const char* api_key,
+                       cJSON* messages, cJSON* tools);
+static char* run_agent_loop(const char *base_url, const char *api_key,
+                            cJSON *messages, cJSON *tools, int is_subagent);
+static char* execute_tool(const char* name, const char* args_str,
+                          const char *base_url, const char *api_key, cJSON *tools);
+
 static size_t curl_write_response(void* contents, size_t size, size_t nmemb,
                                   void* userp) {
     size_t total = size * nmemb;
@@ -96,9 +104,8 @@ static void add_skill_tool(cJSON* tools) {
 
     cJSON* function = cJSON_AddObjectToObject(tool, "function");
     cJSON_AddStringToObject(function, "name", "Skill");
-    cJSON_AddStringToObject(
-        function, "description",
-        "Load a skill's instructions into the conversation");
+    cJSON_AddStringToObject(function, "description",
+                            "Load a skill's instructions into the conversation");
 
     cJSON* parameters = cJSON_AddObjectToObject(function, "parameters");
     cJSON_AddStringToObject(parameters, "type", "object");
@@ -146,27 +153,21 @@ static cJSON* build_tools(void) {
     return tools;
 }
 
-// Substitutes $ARGUMENTS, $ARGUMENTS[i], and $i placeholders in template
-// Caller must free the returned string
-// for step 10
 static char* substitute_placeholders(const char* template,
                                      const char* raw_args) {
     if (!template) return NULL;
 
-    // 1. Trim raw arguments string ($ARGUMENTS)
     char full_args[1024] = "";
     if (raw_args) {
         while (isspace((unsigned char)*raw_args)) raw_args++;
         strncpy(full_args, raw_args, sizeof(full_args) - 1);
         full_args[sizeof(full_args) - 1] = '\0';
-        // Trim trailing space
         size_t fa_len = strlen(full_args);
         while (fa_len > 0 && isspace((unsigned char)full_args[fa_len - 1])) {
             full_args[--fa_len] = '\0';
         }
     }
 
-    // 2. Tokenize positional arguments ($0, $1, ...)
     char* args_tokens[64];
     int arg_count = 0;
     char args_copy[1024];
@@ -179,7 +180,6 @@ static char* substitute_placeholders(const char* template,
         token = strtok(NULL, " \t\r\n");
     }
 
-    // 3. Scan and build the substituted string buffer
     size_t cap = strlen(template) + strlen(full_args) * 2 + 512;
     char* out = malloc(cap);
     if (!out) return NULL;
@@ -188,10 +188,8 @@ static char* substitute_placeholders(const char* template,
     const char* p = template;
     while (*p) {
         if (*p == '$') {
-            // Check for $ARGUMENTS[...] or $ARGUMENTS
             if (strncmp(p, "$ARGUMENTS", 10) == 0) {
                 if (p[10] == '[') {
-                    // $ARGUMENTS[index]
                     char* end_bracket = strchr(p + 11, ']');
                     if (end_bracket) {
                         int idx = atoi(p + 11);
@@ -215,7 +213,6 @@ static char* substitute_placeholders(const char* template,
                         continue;
                     }
                 } else {
-                    // Plain $ARGUMENTS
                     size_t rep_len = strlen(full_args);
                     while (out_len + rep_len + 1 > cap) {
                         cap *= 2;
@@ -231,9 +228,7 @@ static char* substitute_placeholders(const char* template,
                     p += 10;
                     continue;
                 }
-            }
-            // Check for $0, $1, $2, ...
-            else if (isdigit((unsigned char)*(p + 1))) {
+            } else if (isdigit((unsigned char)*(p + 1))) {
                 char* end_digit = NULL;
                 long idx = strtol(p + 1, &end_digit, 10);
                 const char* rep =
@@ -256,7 +251,6 @@ static char* substitute_placeholders(const char* template,
             }
         }
 
-        // Regular character copy
         if (out_len + 2 > cap) {
             cap *= 2;
             char* tmp = realloc(out, cap);
@@ -313,8 +307,6 @@ static char* run_bash(const char* cmd) {
     return output;
 }
 
-// Step 7 & 8: Skills & Frontmatter
-
 static char* trim_whitespace(char* str) {
     if (!str) return NULL;
     while (isspace((unsigned char)*str)) str++;
@@ -326,10 +318,11 @@ static char* trim_whitespace(char* str) {
     return str;
 }
 
-static void parse_frontmatter(const char* frontmatter, char** out_name, char** out_desc, char **out_context) {
-    if(!out_name) *out_name = NULL;
-    if(!out_desc) *out_desc = NULL;
-    if(!out_context) *out_context = NULL;
+static void parse_frontmatter(const char* frontmatter, char** out_name,
+                              char** out_desc, char** out_context) {
+    if (out_name) *out_name = NULL;
+    if (out_desc) *out_desc = NULL;
+    if (out_context) *out_context = NULL;
 
     char* copy = strdup(frontmatter);
     if (!copy) return;
@@ -344,12 +337,10 @@ static void parse_frontmatter(const char* frontmatter, char** out_name, char** o
 
             if (out_name && strcmp(key, "name") == 0 && !*out_name) {
                 *out_name = strdup(val);
-            } 
-            else if (out_desc && strcmp(key, "description") == 0 && !*out_desc) {
+            } else if (out_desc && strcmp(key, "description") == 0 && !*out_desc) {
                 *out_desc = strdup(val);
-            }
-            else if(out_context && strcmp(key, "context") == 0 && !*out_context){
-            	*out_context = strdup(val);
+            } else if (out_context && strcmp(key, "context") == 0 && !*out_context) {
+                *out_context = strdup(val);
             }
         }
         line = strtok(NULL, "\r\n");
@@ -357,27 +348,26 @@ static void parse_frontmatter(const char* frontmatter, char** out_name, char** o
     free(copy);
 }
 
-static int skill_is_forked(const char *skill_name) {
-
+static int skill_is_forked(const char* skill_name) {
     char path[512];
     snprintf(path, sizeof(path), ".claude/skills/%s/SKILL.md", skill_name);
 
     size_t file_len = 0;
-    char *content = read_file(path, &file_len);
+    char* content = read_file(path, &file_len);
     if (!content) return 0;
 
     int forked = 0;
-    char *first_dash = strstr(content, "---");
+    char* first_dash = strstr(content, "---");
     if (first_dash) {
-        char *second_dash = strstr(first_dash + 3, "---");
+        char* second_dash = strstr(first_dash + 3, "---");
         if (second_dash) {
             size_t fm_len = (size_t)(second_dash - (first_dash + 3));
-            char *fm = malloc(fm_len + 1);
+            char* fm = malloc(fm_len + 1);
             if (fm) {
                 memcpy(fm, first_dash + 3, fm_len);
                 fm[fm_len] = '\0';
 
-                char *context = NULL;
+                char* context = NULL;
                 parse_frontmatter(fm, NULL, NULL, &context);
                 if (context && strcmp(context, "fork") == 0) {
                     forked = 1;
@@ -387,12 +377,11 @@ static int skill_is_forked(const char *skill_name) {
             }
         }
     }
-    
+
     free(content);
     return forked;
 }
 
-// step 7: discovers skills and formats the system message
 static char* build_skills_system_prompt(void) {
     DIR* dir = opendir(".claude/skills");
     if (!dir) return NULL;
@@ -468,8 +457,7 @@ static char* build_skills_system_prompt(void) {
 
     const char* footer =
         "\n\nIf a skill matches the user's request, call the Skill tool with "
-        "its "
-        "name and follow the instructions it returns.";
+        "its name and follow the instructions it returns.";
     size_t needed = strlen(prompt) + strlen(footer) + 1;
     if (needed > cap) {
         char* tmp = realloc(prompt, needed);
@@ -480,7 +468,6 @@ static char* build_skills_system_prompt(void) {
     return prompt;
 }
 
-// Step 8: Loads the skill body (content after closing ---)
 static char* load_skill_body(const char* skill_name) {
     char path[512];
     snprintf(path, sizeof(path), ".claude/skills/%s/SKILL.md", skill_name);
@@ -527,10 +514,6 @@ static int skill_exists(const char* name) {
     return access(path, F_OK) == 0;
 }
 
-
-
-// wraps substituted skill body with location context header
-// caller must free returned string
 static char* format_skill_user_message(const char* skill_name,
                                        const char* body) {
     if (!skill_name || !body) return NULL;
@@ -548,7 +531,8 @@ static char* format_skill_user_message(const char* skill_name,
     return out;
 }
 
-static char* execute_tool(const char* name, const char* args_str) {
+static char* execute_tool(const char* name, const char* args_str,
+                          const char *base_url, const char *api_key, cJSON *tools) {
     if (!name || !args_str) {
         return strdup("error: invalid tool call");
     }
@@ -611,7 +595,6 @@ static char* execute_tool(const char* name, const char* args_str) {
     }
 
     if (strcmp(name, "Skill") == 0) {
-    
         cJSON *args = cJSON_Parse(args_str);
         if (!args) return strdup("error: invalid JSON arguments");
 
@@ -639,7 +622,6 @@ static char* execute_tool(const char* name, const char* args_str) {
 
         // Step 13: Handle forked skill in a subagent
         if (skill_is_forked(skill_name)) {
-        
             cJSON *sub_messages = cJSON_CreateArray();
             cJSON *sub_user = cJSON_CreateObject();
             cJSON_AddStringToObject(sub_user, "role", "user");
@@ -651,17 +633,15 @@ static char* execute_tool(const char* name, const char* args_str) {
 
             size_t needed = strlen(skill_name) + (subagent_answer ? strlen(subagent_answer) : 0) + 80;
             char *result = malloc(needed);
-            
             if (result) {
                 snprintf(result, needed, "Skill %s ran in a separate context and returned: %s",
                          skill_name, subagent_answer ? subagent_answer : "");
             }
             if (subagent_answer) free(subagent_answer);
             if (substituted) free(substituted);
-            
             free(body);
             cJSON_Delete(args);
-            
+
             return result ? result : strdup("error: subagent failed");
         }
 
@@ -669,7 +649,6 @@ static char* execute_tool(const char* name, const char* args_str) {
         char *formatted = format_skill_user_message(skill_name, content_to_use);
 
         if (substituted) free(substituted);
-        
         free(body);
         cJSON_Delete(args);
 
@@ -677,65 +656,6 @@ static char* execute_tool(const char* name, const char* args_str) {
     }
 
     return strdup("error: unknown tool");
-}
-
-static char *run_agent_loop(const char *base_url, const char *api_key, cJSON *messages, cJSON *tools, int is_subagent) {
-
-    while (1) {
-        cJSON *json = call_api(base_url, api_key, messages, tools);
-        if (!json) return NULL;
-
-        cJSON *choices = cJSON_GetObjectItem(json, "choices");
-        if (!cJSON_IsArray(choices) || cJSON_GetArraySize(choices) == 0) {
-            cJSON_Delete(json);
-            return NULL;
-        }
-
-        cJSON *first = cJSON_GetArrayItem(choices, 0);
-        cJSON *message = cJSON_GetObjectItem(first, "message");
-        if (!message) {
-            cJSON_Delete(json);
-            return NULL;
-        }
-
-        cJSON_AddItemToArray(messages, cJSON_Duplicate(message, 1));
-
-        cJSON *tool_calls = cJSON_GetObjectItem(message, "tool_calls");
-        if (!cJSON_IsArray(tool_calls) || cJSON_GetArraySize(tool_calls) == 0) {
-            // Final response reached
-            const char *text = cJSON_GetStringValue(cJSON_GetObjectItem(message, "content"));
-            char *ret = NULL;
-            if (is_subagent) {
-                ret = text ? strdup(text) : strdup("");
-            } else if (text) {
-                printf("%s", text);
-            }
-            cJSON_Delete(json);
-            return ret;
-        }
-
-        cJSON *call = NULL;
-        cJSON_ArrayForEach(call, tool_calls) {
-            const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(call, "id"));
-            cJSON *fn = cJSON_GetObjectItem(call, "function");
-            const char *name = cJSON_GetStringValue(cJSON_GetObjectItem(fn, "name"));
-            const char *args_str = cJSON_GetStringValue(cJSON_GetObjectItem(fn, "arguments"));
-
-            fprintf(stderr, "Executing tool: %s\n", name ? name : "(unknown)");
-
-            char *result = execute_tool(name, args_str, base_url, api_key, tools);
-
-            cJSON *tool_msg = cJSON_CreateObject();
-            cJSON_AddStringToObject(tool_msg, "role", "tool");
-            cJSON_AddStringToObject(tool_msg, "tool_call_id", id ? id : "");
-            cJSON_AddStringToObject(tool_msg, "content", result ? result : "");
-            cJSON_AddItemToArray(messages, tool_msg);
-
-            free(result);
-        }
-
-        cJSON_Delete(json);
-    }
 }
 
 static cJSON* call_api(const char* base_url, const char* api_key,
@@ -787,18 +707,73 @@ static cJSON* call_api(const char* base_url, const char* api_key,
     return json;
 }
 
-int main(int argc, char *argv[]) {
+static char *run_agent_loop(const char *base_url, const char *api_key,
+                            cJSON *messages, cJSON *tools, int is_subagent) {
+    while (1) {
+        cJSON *json = call_api(base_url, api_key, messages, tools);
+        if (!json) return NULL;
 
-    // 1. Parse -p argument
+        cJSON *choices = cJSON_GetObjectItem(json, "choices");
+        if (!cJSON_IsArray(choices) || cJSON_GetArraySize(choices) == 0) {
+            cJSON_Delete(json);
+            return NULL;
+        }
+
+        cJSON *first = cJSON_GetArrayItem(choices, 0);
+        cJSON *message = cJSON_GetObjectItem(first, "message");
+        if (!message) {
+            cJSON_Delete(json);
+            return NULL;
+        }
+
+        cJSON_AddItemToArray(messages, cJSON_Duplicate(message, 1));
+
+        cJSON *tool_calls = cJSON_GetObjectItem(message, "tool_calls");
+        if (!cJSON_IsArray(tool_calls) || cJSON_GetArraySize(tool_calls) == 0) {
+            const char *text = cJSON_GetStringValue(cJSON_GetObjectItem(message, "content"));
+            char *ret = NULL;
+            if (is_subagent) {
+                ret = text ? strdup(text) : strdup("");
+            } else if (text) {
+                printf("%s", text);
+            }
+            cJSON_Delete(json);
+            return ret;
+        }
+
+        cJSON *call = NULL;
+        cJSON_ArrayForEach(call, tool_calls) {
+            const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(call, "id"));
+            cJSON *fn = cJSON_GetObjectItem(call, "function");
+            const char *name = cJSON_GetStringValue(cJSON_GetObjectItem(fn, "name"));
+            const char *args_str = cJSON_GetStringValue(cJSON_GetObjectItem(fn, "arguments"));
+
+            fprintf(stderr, "Executing tool: %s\n", name ? name : "(unknown)");
+
+            char *result = execute_tool(name, args_str, base_url, api_key, tools);
+
+            cJSON *tool_msg = cJSON_CreateObject();
+            cJSON_AddStringToObject(tool_msg, "role", "tool");
+            cJSON_AddStringToObject(tool_msg, "tool_call_id", id ? id : "");
+            cJSON_AddStringToObject(tool_msg, "content", result ? result : "");
+            cJSON_AddItemToArray(messages, tool_msg);
+
+            free(result);
+        }
+
+        cJSON_Delete(json);
+    }
+}
+
+int main(int argc, char *argv[]) {
     const char *prompt = NULL;
     if (getopt(argc, argv, "p:") == 'p') prompt = optarg;
-    
+
     if (!prompt) {
         fprintf(stderr, "error: -p flag is required\n");
         return 1;
     }
 
-    // 2. Read environment variables
     const char *api_key = getenv("OPENROUTER_API_KEY");
     const char *base_url = getenv("OPENROUTER_BASE_URL");
     if (!base_url || !*base_url) base_url = "https://openrouter.ai/api/v1";
@@ -811,20 +786,16 @@ int main(int argc, char *argv[]) {
 
     cJSON *messages = cJSON_CreateArray();
 
-    // 3. Inject system prompt with discovered skills (from Step 7/12)
     char *system_prompt = build_skills_system_prompt();
-    
     if (system_prompt) {
     
         cJSON *sys_msg = cJSON_CreateObject();
         cJSON_AddStringToObject(sys_msg, "role", "system");
         cJSON_AddStringToObject(sys_msg, "content", system_prompt);
         cJSON_AddItemToArray(messages, sys_msg);
-        
         free(system_prompt);
     }
 
-    // 4. Expand stacked slash commands or add raw prompt (from Step 10/11)
     char *expanded_skills[32];
     int expanded_count = 0;
     const char *curr = prompt;
@@ -832,7 +803,6 @@ int main(int argc, char *argv[]) {
     while (*curr) {
     
         while (*curr && isspace((unsigned char)*curr)) curr++;
-        
         if (*curr != '/') break;
 
         const char *token_start = curr + 1;
@@ -867,6 +837,7 @@ int main(int argc, char *argv[]) {
     
         for (int i = 0; i < expanded_count; i++) {
             char *body = load_skill_body(expanded_skills[i]);
+            
             if (body) {
             
                 char *substituted = substitute_placeholders(body, raw_args);
@@ -886,15 +857,10 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // 5. Build tools (Read, Write, Bash, Skill)
     cJSON *tools = build_tools();
 
-    // 6. RUN THE AGENT LOOP
-    // Instead of inlining 80 lines of while(1) here, we call the extracted runner.
-    // Notice is_subagent = 0, meaning it prints the final answer directly to stdout.
     run_agent_loop(base_url, api_key, messages, tools, 0);
 
-    // 7. Cleanup
     cJSON_Delete(messages);
     cJSON_Delete(tools);
     curl_global_cleanup();
