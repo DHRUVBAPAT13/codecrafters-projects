@@ -1,13 +1,32 @@
 cmake_minimum_required(VERSION 3.13)
+project(claude_code C)
 
-project(codecrafters-claude-code)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
-file(GLOB_RECURSE SOURCE_FILES src/*.c src/*.h)
-
-set(CMAKE_C_STANDARD 23) # Enable the C23 standard
-
+# Find required system libraries
 find_package(CURL REQUIRED)
-find_package(cJSON CONFIG REQUIRED)
+find_package(cJSON REQUIRED)
 
-add_executable(claude-code ${SOURCE_FILES})
-target_link_libraries(claude-code PRIVATE CURL::libcurl cjson)
+# Define source files
+set(SOURCES
+    src/main.c
+    src/mcp.c
+    src/session.c
+)
+
+# Build executable
+add_executable(claude-code ${SOURCES})
+
+# Target include directories
+target_include_directories(claude-code PRIVATE
+    src
+    ${CURL_INCLUDE_DIRS}
+    ${CJSON_INCLUDE_DIRS}
+)
+
+# Link libraries
+target_link_libraries(claude-code PRIVATE
+    ${CURL_LIBRARIES}
+    cjson
+)

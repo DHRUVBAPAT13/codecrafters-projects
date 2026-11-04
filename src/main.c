@@ -6,19 +6,29 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <getopt.h>
+
+#include "mcp.h"
+#include "session.h"
 
 struct response_buf {
     char* data;
     size_t size;
 };
 
-// Forward declarations to avoid implicit declaration errors
+// Forward declarations
 static cJSON* call_api(const char* base_url, const char* api_key,
                        cJSON* messages, cJSON* tools);
+                       
 static char* run_agent_loop(const char *base_url, const char *api_key,
-                            cJSON *messages, cJSON *tools, int is_subagent);
+                            cJSON *messages, cJSON *tools, MCP_Manager *mcp_mgr, Session *sess, int is_subagent);
+                            
 static char* execute_tool(const char* name, const char* args_str,
-                          const char *base_url, const char *api_key, cJSON *tools);
+                          const char *base_url, const char *api_key,
+                          cJSON *tools, MCP_Manager *mcp_mgr, Session *sess);
+                          
+static cJSON* build_tools(MCP_Manager *mcp_mgr);
+
 
 static size_t curl_write_response(void* contents, size_t size, size_t nmemb,
                                   void* userp) {
@@ -128,7 +138,8 @@ static void add_skill_tool(cJSON* tools) {
     cJSON_AddItemToArray(tools, tool);
 }
 
-static cJSON* build_tools(void) {
+static cJSON* build_tools(MCP_Manager *mcp_mgr) {
+
     cJSON* tools = cJSON_CreateArray();
 
     const char* read_params[][2] = {
@@ -149,6 +160,11 @@ static cJSON* build_tools(void) {
     add_tool(tools, "Bash", "Execute a shell command", bash_params, 1);
 
     add_skill_tool(tools);
+    
+    // register dynamic tools exposed by external MCP servers
+    if(mcp_mgr) {
+    	mcp_manager_register_tools(mcp_mgr, tools);
+    }
 
     return tools;
 }
@@ -190,7 +206,7 @@ static char* substitute_placeholders(const char* template,
         if (*p == '$') {
             if (strncmp(p, "$ARGUMENTS", 10) == 0) {
                 if (p[10] == '[') {
-                    char* end_bracket = strchr(p + 11, ']');
+                    const char *end_bracket = strchr(p + 11, ']');
                     if (end_bracket) {
                         int idx = atoi(p + 11);
                         const char* rep = (idx >= 0 && idx < arg_count)
@@ -531,8 +547,9 @@ static char* format_skill_user_message(const char* skill_name,
     return out;
 }
 
-static char* execute_tool(const char* name, const char* args_str,
-                          const char *base_url, const char *api_key, cJSON *tools) {
+static char* execute_tool(const char* name, const char* args_str, const char *base_url,
+					const char *api_key, cJSON *tools, MCP_Manager *mcp_mgr, Session *sess) {
+
     if (!name || !args_str) {
         return strdup("error: invalid tool call");
     }
@@ -622,13 +639,15 @@ static char* execute_tool(const char* name, const char* args_str,
 
         // Step 13: Handle forked skill in a subagent
         if (skill_is_forked(skill_name)) {
+        
             cJSON *sub_messages = cJSON_CreateArray();
             cJSON *sub_user = cJSON_CreateObject();
             cJSON_AddStringToObject(sub_user, "role", "user");
             cJSON_AddStringToObject(sub_user, "content", content_to_use);
             cJSON_AddItemToArray(sub_messages, sub_user);
 
-            char *subagent_answer = run_agent_loop(base_url, api_key, sub_messages, tools, 1);
+            // Subagent is invoked with NULL session so its internal loop is isolated
+            char *subagent_answer = run_agent_loop(base_url, api_key, sub_messages, tools, mcp_mgr, NULL, 1);
             cJSON_Delete(sub_messages);
 
             size_t needed = strlen(skill_name) + (subagent_answer ? strlen(subagent_answer) : 0) + 80;
@@ -654,6 +673,12 @@ static char* execute_tool(const char* name, const char* args_str,
 
         return formatted ? formatted : strdup("error: failed to format skill instructions");
     }
+    
+    // Delegate external MCP tool calls
+    if (mcp_mgr && mcp_manager_has_tool(mcp_mgr, name)) {
+    
+        return mcp_manager_call_tool(mcp_mgr, name, args_str);
+    }
 
     return strdup("error: unknown tool");
 }
@@ -661,7 +686,9 @@ static char* execute_tool(const char* name, const char* args_str,
 static cJSON* call_api(const char* base_url, const char* api_key,
                        cJSON* messages, cJSON* tools) {
     cJSON* req = cJSON_CreateObject();
-    cJSON_AddStringToObject(req, "model", "anthropic/claude-haiku-4.5");
+    // Switch to North Mini Code (or your preferred free model slug from OpenRouter)
+    cJSON_AddStringToObject(req, "model", "cohere/north-mini-code:free");
+    cJSON_AddNumberToObject(req, "max_tokens", 2048);
     cJSON_AddItemReferenceToObject(req, "messages", messages);
     cJSON_AddItemReferenceToObject(req, "tools", tools);
 
@@ -699,6 +726,9 @@ static cJSON* call_api(const char* base_url, const char* api_key,
         return NULL;
     }
 
+    // DEBUG: print raw response
+    // fprintf(stderr, "API Response: %s\n", resp.data ? resp.data : "(null)");
+
     cJSON* json = cJSON_Parse(resp.data);
     free(resp.data);
     if (!json) {
@@ -707,14 +737,24 @@ static cJSON* call_api(const char* base_url, const char* api_key,
     return json;
 }
 
-static char *run_agent_loop(const char *base_url, const char *api_key,
-                            cJSON *messages, cJSON *tools, int is_subagent) {
+
+static char *run_agent_loop(const char *base_url, const char *api_key, cJSON *messages, cJSON *tools,
+                            MCP_Manager *mcp_mgr, Session *sess, int is_subagent) {
+                            
     while (1) {
         cJSON *json = call_api(base_url, api_key, messages, tools);
         if (!json) return NULL;
 
         cJSON *choices = cJSON_GetObjectItem(json, "choices");
         if (!cJSON_IsArray(choices) || cJSON_GetArraySize(choices) == 0) {
+            cJSON *err = cJSON_GetObjectItem(json, "error");
+            if (err) {
+                char *err_str = cJSON_Print(err);
+                fprintf(stderr, "API returned error: %s\n", err_str);
+                free(err_str);
+            } else {
+                fprintf(stderr, "No choices array in response\n");
+            }
             cJSON_Delete(json);
             return NULL;
         }
@@ -726,56 +766,137 @@ static char *run_agent_loop(const char *base_url, const char *api_key,
             return NULL;
         }
 
+        // Add assistant turn to in-memory conversation
         cJSON_AddItemToArray(messages, cJSON_Duplicate(message, 1));
 
-        cJSON *tool_calls = cJSON_GetObjectItem(message, "tool_calls");
-        if (!cJSON_IsArray(tool_calls) || cJSON_GetArraySize(tool_calls) == 0) {
-            const char *text = cJSON_GetStringValue(cJSON_GetObjectItem(message, "content"));
-            char *ret = NULL;
-            if (is_subagent) {
-                ret = text ? strdup(text) : strdup("");
-            } else if (text) {
-                printf("%s", text);
+        cJSON *tool_calls = cJSON_GetObjectItemCaseSensitive(message, "tool_calls");
+
+        // 1. If tool calls are requested by the model
+        if (tool_calls && cJSON_IsArray(tool_calls) && cJSON_GetArraySize(tool_calls) > 0) {
+            cJSON *content_item = cJSON_GetObjectItemCaseSensitive(message, "content");
+            const char *content_str = (content_item && cJSON_IsString(content_item)) ? content_item->valuestring : NULL;
+
+            // Persist the assistant message containing tool_calls
+            if (sess && !is_subagent) {
+                session_log_assistant_tool_calls(sess, tool_calls, content_str);
             }
+
+            // 2. Iterate each tool call and execute
+            cJSON *call = NULL;
+            cJSON_ArrayForEach(call, tool_calls) {
+                cJSON *id_obj = cJSON_GetObjectItemCaseSensitive(call, "id");
+                cJSON *fn_obj = cJSON_GetObjectItemCaseSensitive(call, "function");
+                cJSON *name_obj = fn_obj ? cJSON_GetObjectItemCaseSensitive(fn_obj, "name") : NULL;
+                cJSON *args_obj = fn_obj ? cJSON_GetObjectItemCaseSensitive(fn_obj, "arguments") : NULL;
+
+                const char *call_id = id_obj ? id_obj->valuestring : "";
+                const char *tool_name = name_obj ? name_obj->valuestring : "";
+                const char *args_str = args_obj ? args_obj->valuestring : "{}";
+
+                fprintf(stderr, "Executing tool: %s\n", tool_name);
+
+                // Execute the tool
+                char *tool_output = execute_tool(tool_name, args_str, base_url, api_key, tools, mcp_mgr, sess);
+
+                // Add tool response to in-memory conversation for next turn
+                cJSON *tool_resp_msg = cJSON_CreateObject();
+                cJSON_AddStringToObject(tool_resp_msg, "role", "tool");
+                cJSON_AddStringToObject(tool_resp_msg, "tool_call_id", call_id);
+                cJSON_AddStringToObject(tool_resp_msg, "name", tool_name);
+                cJSON_AddStringToObject(tool_resp_msg, "content", tool_output ? tool_output : "");
+                cJSON_AddItemToArray(messages, tool_resp_msg);
+
+                // Persist the tool execution result
+                if (sess && !is_subagent) {
+                    session_log_tool_result(sess, call_id, tool_name, tool_output);
+                }
+
+                if (tool_output) free(tool_output);
+            }
+
             cJSON_Delete(json);
-            return ret;
+            // Re-enter loop so model processes tool outputs
+            continue;
         }
 
-        cJSON *call = NULL;
-        cJSON_ArrayForEach(call, tool_calls) {
-            const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(call, "id"));
-            cJSON *fn = cJSON_GetObjectItem(call, "function");
-            const char *name = cJSON_GetStringValue(cJSON_GetObjectItem(fn, "name"));
-            const char *args_str = cJSON_GetStringValue(cJSON_GetObjectItem(fn, "arguments"));
+        // 3. Normal text response (no tool calls) -> persist, display, and exit loop
+        if (sess && !is_subagent) {
+            session_append_message(sess, message);
+        }
 
-            fprintf(stderr, "Executing tool: %s\n", name ? name : "(unknown)");
-
-            char *result = execute_tool(name, args_str, base_url, api_key, tools);
-
-            cJSON *tool_msg = cJSON_CreateObject();
-            cJSON_AddStringToObject(tool_msg, "role", "tool");
-            cJSON_AddStringToObject(tool_msg, "tool_call_id", id ? id : "");
-            cJSON_AddStringToObject(tool_msg, "content", result ? result : "");
-            cJSON_AddItemToArray(messages, tool_msg);
-
-            free(result);
+        cJSON *content = cJSON_GetObjectItem(message, "content");
+        char *final_text = NULL;
+        if (content && cJSON_IsString(content)) {
+            final_text = strdup(content->valuestring);
+            if (!is_subagent) {
+                printf("%s\n", final_text);
+            }
         }
 
         cJSON_Delete(json);
+        return final_text;
     }
 }
 
-int main(int argc, char *argv[]) {
-    const char *prompt = NULL;
-    if (getopt(argc, argv, "p:") == 'p') prompt = optarg;
 
-    if (!prompt) {
-        fprintf(stderr, "error: -p flag is required\n");
-        return 1;
-    }
+int main(int argc, char *argv[]) {
+
+	const char *prompt = NULL;
+    const char *resume_id = NULL;
+    int continue_latest = 0;
+
+    // Update long_options array in main()
+	static struct option long_options[] = {
+	    {"prompt",        required_argument, 0, 'p'},
+	    {"continue",      no_argument,       0, 'c'},
+	    {"resume",        required_argument, 0, 'r'},
+	    {"list-sessions", no_argument,       0, 'l'},
+	    {0, 0, 0, 0}
+	};
+
+	int list_sessions = 0;
+	int opt;
+	int option_index = 0;
+	while ((opt = getopt_long(argc, argv, "p:cr:l", long_options, &option_index)) != -1) {
+	    switch (opt) {
+	        case 'p':
+	            prompt = optarg;
+	            break;
+	        case 'c':
+	            continue_latest = 1;
+	            break;
+	        case 'r':
+	            resume_id = optarg;
+	            break;
+	        case 'l':
+	            list_sessions = 1;
+	            break;
+	        default:
+	            fprintf(stderr, "Usage: %s [-p \"<prompt>\"] [--continue|-c] [--resume|-r <session_id>] [--list-sessions|-l]	\n", argv[0]);
+            return 1;
+    	}
+	}
+
+	// Handle --list-sessions immediately without requiring -p
+	if (list_sessions) {
+	    session_list_all();
+	    return 0;
+	}
+	
+	if (!prompt) {
+	    fprintf(stderr, "error: -p flag is required when not listing sessions\n");
+	    return 1;
+	}
+
+	// Validate resume target before initializing
+	if (resume_id && !session_exists(resume_id)) {
+		    fprintf(stderr, "error: session '%s' not found in %s\n", resume_id, SESSION_DIR);
+	    return 1;
+	}
 
     const char *api_key = getenv("OPENROUTER_API_KEY");
     const char *base_url = getenv("OPENROUTER_BASE_URL");
+    
     if (!base_url || !*base_url) base_url = "https://openrouter.ai/api/v1";
     if (!api_key || !*api_key) {
         fprintf(stderr, "OPENROUTER_API_KEY is not set\n");
@@ -783,9 +904,26 @@ int main(int argc, char *argv[]) {
     }
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
+    
+    // 1. initialize MCP Servers if .mcp.json exists
+    MCP_Manager *mcp_mgr = mcp_manager_init(".mcp.json");
+    
+    // 2. Open or resume session
+    Session *sess = session_open(resume_id, continue_latest);
+    
+    if (!sess) {
+        fprintf(stderr, "warning: failed to initialize session storage\n");
+    } 
+    else if (sess->is_resumed) {
+        fprintf(stderr, "Resuming session: %s\n", sess->id);
+    } 
+    else {
+        fprintf(stderr, "Started new session: %s\n", sess->id);
+    }
 
     cJSON *messages = cJSON_CreateArray();
 
+	// 3. Inject system prompt
     char *system_prompt = build_skills_system_prompt();
     if (system_prompt) {
     
@@ -793,9 +931,16 @@ int main(int argc, char *argv[]) {
         cJSON_AddStringToObject(sys_msg, "role", "system");
         cJSON_AddStringToObject(sys_msg, "content", system_prompt);
         cJSON_AddItemToArray(messages, sys_msg);
+        
         free(system_prompt);
     }
+    
+    // 4. Restore conversation history if resuming
+    if (sess && sess->is_resumed) {
+        session_load_history(sess, messages);
+    }
 
+    /* ... [Slash command parsing and expanded_skills handling] ... */
     char *expanded_skills[32];
     int expanded_count = 0;
     const char *curr = prompt;
@@ -826,12 +971,17 @@ int main(int argc, char *argv[]) {
     while (*curr && isspace((unsigned char)*curr)) curr++;
     const char *raw_args = curr;
 
+    // 5. Append user message turn into messages and commit to JSONL
     if (expanded_count == 0) {
     
         cJSON *user_msg = cJSON_CreateObject();
         cJSON_AddStringToObject(user_msg, "role", "user");
         cJSON_AddStringToObject(user_msg, "content", prompt);
         cJSON_AddItemToArray(messages, user_msg);
+        
+        if (sess) {
+            session_append_message(sess, user_msg);
+        }
     } 
     else {
     
@@ -848,6 +998,10 @@ int main(int argc, char *argv[]) {
                 cJSON_AddStringToObject(user_msg, "role", "user");
                 cJSON_AddStringToObject(user_msg, "content", final_content ? final_content : body_content);
                 cJSON_AddItemToArray(messages, user_msg);
+                
+                if (sess) {
+            		session_append_message(sess, user_msg);
+        		}
 
                 if (final_content) free(final_content);
                 if (substituted) free(substituted);
@@ -857,13 +1011,24 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    cJSON *tools = build_tools();
+    // 6. build tools with MCP integration
+    cJSON *tools = build_tools(mcp_mgr);
 
-    run_agent_loop(base_url, api_key, messages, tools, 0);
+    // 7. run the loop
+    run_agent_loop(base_url, api_key, messages, tools, mcp_mgr, sess, 0);
 
+    // 8. teardown
     cJSON_Delete(messages);
     cJSON_Delete(tools);
-    curl_global_cleanup();
+    
+    if (sess) {
+        session_close(sess);
+    }
 
+    if (mcp_mgr) {
+        mcp_manager_cleanup(mcp_mgr);
+    }
+
+    curl_global_cleanup();
     return 0;
 }
